@@ -1,0 +1,116 @@
+#include "stm32f4xx_hal.h"
+
+//This Systick Handler function is what calls the tick increment function. It is an internal clock that controls any time dependant function in the HAL library such as HAL_Delay();
+void SysTick_Handler(void)
+{
+    HAL_IncTick();
+}
+
+TIM_HandleTypeDef htim1 = {0};
+
+
+int main()
+{
+	HAL_Init();
+	__HAL_RCC_PWR_CLK_ENABLE();
+
+
+	RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+	RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+	RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+	RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+	RCC_OscInitStruct.PLL.PLLM = 8;
+	RCC_OscInitStruct.PLL.PLLN = 180;
+	RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+	RCC_OscInitStruct.PLL.PLLQ = 4;
+
+	HAL_RCC_OscConfig(&RCC_OscInitStruct);
+	HAL_PWREx_EnableOverDrive();
+
+
+	RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+	                            | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+	RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+	RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+
+	HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+
+
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+
+
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+	GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	GPIO_InitStruct.Alternate = GPIO_AF1_TIM1; //TIM1 peripheral properties configured later on, these gpio pins are now tied to the signal outputted by the peripheral
+
+
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+
+
+	GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+
+	__HAL_RCC_TIM1_CLK_ENABLE();
+	 //htim initizlizes tim1 peripheral as a whole, all the channels in it get the same settings
+	htim1.Instance = TIM1;
+	htim1.Init.Prescaler = 179; // (179+1) / 180MHz = 1MHz frequency
+	htim1.Init.Period = 19999; // controls PWM frequency (Initialization period decides when timer starts back at 0 once again)
+	                           // (19999+1) = 20000 ticks or 20ms at 1MHz frequency
+	                           // Every time clock resets, PWM finishes cycle
+	                           // one PWM cycle every 20ms is 50Hz
+
+    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;//standard direction to count for PWM (from 0 to 19999)
+    htim1.Init.RepetitionCounter = 0;
+    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+
+    HAL_TIM_PWM_Init(&htim1);
+
+    //sConfigOC, OC stands for Output Comparer, and this allows each channel in TIM1 to output a different PWM signal
+    //this is needed, since different PWM signals are needed between the motor and servo
+	TIM_OC_InitTypeDef sConfigOC = {0};
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 1500; //PWM PUlse is 1500 microseconds, this is the default PWM signal sent to the servo to keep it at a default "straight" position
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+
+
+    //NOTE FOR LATER: If you want to change the default duty cycle to make the motor and servo's idle straigher, change sConfigOC.Pulse = 1500
+    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1); //using the two structs, PWM is configured completely for both TIM peripheral channels, one for the servo and one for the motor
+    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2);
+
+
+    //Now PWM will be outputted through funciton calls below:
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+
+
+
+
+
+
+
+
+
+	while(1)
+	{
+
+	}
+	}

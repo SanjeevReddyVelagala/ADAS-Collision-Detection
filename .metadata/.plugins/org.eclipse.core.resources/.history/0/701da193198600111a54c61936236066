@@ -1,0 +1,232 @@
+#include "stm32f4xx_hal.h"
+#include <string.h>
+#include <stdlib.h>
+
+//This Systick Handler function is what calls the tick increment function. It is an internal clock that controls any time dependant function in the HAL library such as HAL_Delay();
+void SysTick_Handler(void)
+{
+    HAL_IncTick();
+}
+
+TIM_HandleTypeDef htim1 = {0};
+UART_HandleTypeDef huart2 = {0};
+
+uint8_t rxByte;
+char cmdBuffer[32];
+uint8_t cmd_index = 0;
+uint32_t lastCommandTime = 0;
+
+void parseCommand(char* cmd)
+{
+    lastCommandTime = HAL_GetTick();
+
+    if (cmd[0] == 'T')
+    {
+        uint32_t steerVal = atoi(&cmd[1]);
+        if (steerVal >= 1000 && steerVal <= 2000)
+        {
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, steerVal);
+        }
+    }
+    else if (cmd[0] == 'S')
+    {
+        uint32_t throttleVal = atoi(&cmd[1]);
+        if (throttleVal >= 1000 && throttleVal <= 2000)
+        {
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, throttleVal);
+        }
+    }
+    else if (strncmp(cmd, "MANUAL", 6) == 0)
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    }
+    else if (strncmp(cmd, "AUTO", 4) == 0)
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+    }
+}
+
+//in order for the cpu to know that a message came though UART, interrupt must exist, otherwise CPU must continuously check for UART inputs in teh while loop
+//two "gates" must be lifted for interrupts to come through the UART
+//    Door 1 = UART_IT_RXNE    (inside USART2 peripheral)
+//    Door 2 = NVIC EnableIRQ  (at the CPU level)
+//
+//    Both doors must be open for the interrupt to reach the CPU
+
+//how interrupt works:
+//1) Bit is recieved though RX of huart2
+//2) Detected by NVIC, which has gate 38 open(enum for USART2)
+//3) USART2 IRQ handler built in function is called due to this
+//4) HAL_UART_IRQHandler calls callback function, where data in USART2 is actually used
+
+void USART2_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart2);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)//same callback function fires for all UART related interrupts so this check is necessary
+    {
+        if(rxByte == '\n')
+        {
+            cmdBuffer[cmd_index] = '\0';
+            parseCommand(cmdBuffer);
+            cmd_index = 0;
+        }
+        else
+        {
+            if (cmd_index < 31)
+            {
+                cmdBuffer[cmd_index++] = rxByte;
+            }
+        }
+
+        // process rxByte here
+        HAL_UART_Receive_IT(&huart2, &rxByte, 1);
+    }
+}
+
+void checkWatchdog(void)
+{
+    if (HAL_GetTick() - lastCommandTime > 500)
+    {
+        // No command received in 500ms — force safe state
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1500);
+    }
+}
+
+int main()
+{
+    HAL_Init();
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL.PLLM = 8;
+    RCC_OscInitStruct.PLL.PLLN = 180;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 4;
+
+    HAL_RCC_OscConfig(&RCC_OscInitStruct);
+    HAL_PWREx_EnableOverDrive();
+
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1; //TIM1 peripheral properties configured later on, these gpio pins are now tied to the signal outputted by the peripheral
+
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = 0;
+
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    __HAL_RCC_TIM1_CLK_ENABLE();
+    //htim initizlizes tim1 peripheral as a whole, all the channels in it get the same settings
+    htim1.Instance = TIM1;
+    htim1.Init.Prescaler = 179; // (179+1) / 180MHz = 1MHz frequency
+    htim1.Init.Period = 19999; // controls PWM frequency (Initialization period decides when timer starts back at 0 once again)
+                               // (19999+1) = 20000 ticks or 20ms at 1MHz frequency
+                               // Every time clock resets, PWM finishes cycle
+                               // one PWM cycle every 20ms is 50Hz
+    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;//standard direction to count for PWM (from 0 to 19999)
+    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim1.Init.RepetitionCounter = 0;
+    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+
+    HAL_TIM_PWM_Init(&htim1);
+
+    //sConfigOC, OC stands for Output Comparer, and this allows each channel in TIM1 to output a different PWM signal
+    //this is needed, since different PWM signals are needed between the motor and servo
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 1500; //PWM PUlse is 1500 microseconds, this is the default PWM signal sent to the servo to keep it at a default "straight" position
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+
+    //NOTE FOR LATER: If you want to change the default duty cycle to make the motor and servo's idle straigher, change sConfigOC.Pulse = 1500
+    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1); //using the two structs, PWM is configured completely for both TIM peripheral channels, one for the servo and one for the motor
+    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2);
+
+    //Now PWM will be outputted through funciton calls below:
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1500);
+    HAL_Delay(3000);
+
+    //USART2 Initialization
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;//baud rate ting
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;//8bit uart message
+    huart2.Init.StopBits = UART_STOPBITS_1;//you can either have one or two stop bits that signify that the uart message is done
+    huart2.Init.Parity = UART_PARITY_NONE; //parity is for double checking whether noise has affected the electrical signal when bits are sent over, even parity of odd parity are the options
+    huart2.Init.Mode = UART_MODE_TX_RX;//uart can send and receive bits in this mode
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE; //prevents tx from sending over data faster than rx can process it
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16; //each bit sampled 16 times to check whether it is a 1 or a 0
+                                                     //lower sampling, higher baudrate allowed since less sampling = faster
+    HAL_UART_Init(&huart2);
+
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); //RXNE stands for receive not empty, when a byte gets detected in reception, this flag is set to 1
+    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn); //causes NVIC to unblock path to CPU
+    //USART2_IRQn is an enum number that is in the NVIC's table as the number to lift when USART2 interrupts are needed
+
+    HAL_UART_Receive_IT(&huart2, &rxByte, 1);//when armed, its WAIITIGN until one bytw comes, then gets disarmed
+
+
+    while(1)
+    {
+
+
+        checkWatchdog();
+        HAL_Delay(10);
+    }
+}
